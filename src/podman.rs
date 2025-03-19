@@ -87,6 +87,21 @@ impl Podman {
         self.request(req).await
     }
 
+    pub async fn delete(&mut self, path: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+        let path_with_prefix = format!("{}{}", self.api_version, path);
+        let url: Uri = Uri::new(self.path.as_str(), path_with_prefix.as_str()).into();
+
+        let payload = Full::new(Bytes::from(Vec::new()));
+
+        let req = Request::builder()
+            .method(Method::DELETE)
+            .uri(url)
+            .header(CONTENT_TYPE, "application/json")
+            .body(payload)?;
+
+        self.request(req).await
+    }
+
 
     pub async fn create_container(&mut self, name: Option<&str>, image: &str) -> Result<String, Box<dyn std::error::Error>> {
         let spec = json!({
@@ -94,7 +109,6 @@ impl Podman {
             "name": name,
             "stdin": true,
             "tty": true,
-            "rm": true
         });
 
         let payload: Vec<u8> = spec.to_string().into();
@@ -105,6 +119,33 @@ impl Podman {
         Ok(result)
     }
 
+    pub async fn start_container(&mut self, name: &str) -> Result<String, Box<dyn std::error::Error>> {
+        let payload = Vec::<u8>::new();
+
+        let path = format!("/libpod/containers/{}/start", name);
+        let resp = self.post(path.as_str(), payload).await?;
+
+        let result = String::from_utf8(resp)?;
+        Ok(result)
+    }
+
+    pub async fn stop_container(&mut self, name: &str) -> Result<String, Box<dyn std::error::Error>> {
+        let payload = Vec::<u8>::new();
+
+        let path = format!("/libpod/containers/{}/stop", name);
+        let resp = self.post(path.as_str(), payload).await?;
+
+        let result = String::from_utf8(resp)?;
+        Ok(result)
+    }
+
+    pub async fn delete_container(&mut self, name: &str, force: bool) -> Result<String, Box<dyn std::error::Error>> {
+        let path = format!("/libpod/containers/{}?force={}", name, force);
+        let resp = self.delete(path.as_str()).await?;
+
+        let result = String::from_utf8(resp)?;
+        Ok(result)
+    }
 
 }
 
@@ -122,10 +163,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_create_container() {
+    async fn test_create_start_stop_delete_container() {
         let mut pm = Podman::new(None).await.unwrap();
-        let result = pm.create_container(Some("arkade_test_container"), "netutils").await;
-        let actual = result.unwrap_or_default();
+
+        let container_name = "arkade_test_container";
+
+        let actual = pm.create_container(Some(container_name), "netutils").await.unwrap_or_default();
+        assert_ne!("", actual);
+
+        let actual = pm.start_container(container_name).await.unwrap_or_default();
+        assert_eq!("", actual);
+
+        let actual = pm.stop_container(container_name).await.unwrap_or_default();
+        assert_eq!("", actual);
+
+        let actual = pm.delete_container(container_name, true).await.unwrap_or_default();
         assert_ne!("", actual);
     }
 
