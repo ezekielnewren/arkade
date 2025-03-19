@@ -42,8 +42,19 @@ impl Podman {
 
         Ok(buffer)
     }
-
-
 }
 
+#[cfg(test)]
+mod tests {
+    use crate::podman::Podman;
 
+    #[tokio::test]
+    async fn test_podman_ping() {
+        let mut pm = Podman::new(None);
+
+        let result = pm.get("/v4.0.0/libpod/_ping", None).await.unwrap();
+        let actual = std::str::from_utf8(result.as_slice()).unwrap();
+        assert_eq!("OK", actual);
+    }
+
+}
