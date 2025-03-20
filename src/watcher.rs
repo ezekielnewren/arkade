@@ -30,8 +30,8 @@ impl PortWatcher {
     pub fn new(iface: &str) -> Self {
         Self {
             interface: iface.to_string(),
-            tcp: BitSet::default(),
-            udp: BitSet::default(),
+            tcp: BitSet::with_capacity(0x10000),
+            udp: BitSet::with_capacity(0x10000),
         }
     }
 
@@ -82,23 +82,22 @@ impl PortWatcher {
 
         let mut info = PortInfo {
             timestamp: Instant::now(),
-            tcp: BitSet::default(),
-            udp: BitSet::default(),
+            tcp: BitSet::with_capacity(0x10000),
+            udp: BitSet::with_capacity(0x10000),
         };
 
         loop {
-            println!("waiting for a packet");
             let mut guard = async_fd.readable().await?;
-            println!("got a packet");
             match guard.try_io(|fd| fd.get_ref().recv_from(&mut buf)) {
                 Ok(Ok((len, _addr))) => {
                     let vec: Vec::<u8> = buf[..len].iter().map(|v| unsafe { v.assume_init() }).collect();
                     parse_packet(vec.as_slice(), &mut info);
-                    // let view = std::str::from_utf8(vec.as_slice()).unwrap();
-                    lambda(&info);
+                    if info.timestamp.elapsed().as_secs_f32() >= 1.0 {
+                        info.timestamp = Instant::now();
+                        lambda(&info);
+                    }
                 },
-                Ok(Err(e)) => eprintln!("Read error: {}", e),
-                Err(e) => eprintln!("other error"),
+                _ => {},
             }
         }
     }
