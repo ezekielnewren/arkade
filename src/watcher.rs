@@ -1,7 +1,7 @@
 use std::ffi::CString;
 use std::mem::MaybeUninit;
 use std::os::fd::AsRawFd;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use bitset::BitSet;
 use pnet::packet::ethernet::EthernetPacket;
 use pnet::packet::ip::IpNextHeaderProtocols;
@@ -12,6 +12,7 @@ use pnet::packet::tcp::TcpPacket;
 use pnet::packet::udp::UdpPacket;
 use socket2::{Domain, Protocol, Socket, Type};
 use tokio::io::unix::AsyncFd;
+use tokio::time::timeout;
 
 pub struct PortWatcher {
     interface: String,
@@ -21,6 +22,7 @@ pub struct PortWatcher {
 
 pub struct PortInfo {
     timestamp: Instant,
+    report: bool,
     pub tcp: BitSet,
     pub udp: BitSet,
 }
@@ -80,25 +82,44 @@ impl PortWatcher {
         let async_fd = AsyncFd::new(socket)?;
         let mut buf: [MaybeUninit<u8>; 65536] = unsafe { MaybeUninit::uninit().assume_init() };
 
+        let mut callback = |info: &mut PortInfo| {
+            if info.timestamp.elapsed().as_secs_f32() >= 1.0 {
+                info.timestamp = Instant::now();
+                if info.report {
+                    lambda(&info);
+                }
+                info.report = false;
+                info.tcp.reset();
+                info.udp.reset();
+            }
+        };
+
         let mut info = PortInfo {
             timestamp: Instant::now(),
+            report: false,
             tcp: BitSet::with_capacity(0x10000),
             udp: BitSet::with_capacity(0x10000),
         };
 
+
         loop {
-            let mut guard = async_fd.readable().await?;
-            match guard.try_io(|fd| fd.get_ref().recv_from(&mut buf)) {
-                Ok(Ok((len, _addr))) => {
-                    let vec: Vec::<u8> = buf[..len].iter().map(|v| unsafe { v.assume_init() }).collect();
-                    parse_packet(vec.as_slice(), &mut info);
-                    if info.timestamp.elapsed().as_secs_f32() >= 1.0 {
-                        info.timestamp = Instant::now();
-                        lambda(&info);
+            match timeout(Duration::from_secs(1), async_fd.readable()).await {
+                Ok(Ok(mut guard)) => {
+                    match guard.try_io(|fd| fd.get_ref().recv_from(&mut buf)) {
+                        Ok(Ok((len, _addr))) => {
+                            let vec: Vec::<u8> = buf[..len].iter().map(|v| unsafe { v.assume_init() }).collect();
+                            parse_packet(vec.as_slice(), &mut info);
+                            callback(&mut info);
+                        },
+                        _ => {}
                     }
-                },
-                _ => {},
+                }
+                Ok(Err(e)) => eprintln!("Socket error: {}", e), // Handle socket errors
+                Err(_) => {
+                    callback(&mut info);
+                }
             }
+
         }
     }
 }
@@ -115,10 +136,12 @@ fn parse_packet(packet: &[u8], info: &mut PortInfo) -> Option<()> {
                 IpNextHeaderProtocols::Tcp => {
                     let tcp = TcpPacket::new(ipv4.payload())?;
                     info.tcp.set(tcp.get_destination() as usize, true);
+                    info.report = true;
                 }
                 IpNextHeaderProtocols::Udp => {
                     let udp = UdpPacket::new(ipv4.payload())?;
                     info.udp.set(udp.get_destination() as usize, true);
+                    info.report = true;
                 }
                 _ => return None, // Ignore ICMP (Ping), IGMP, and other protocols
             }
@@ -129,10 +152,12 @@ fn parse_packet(packet: &[u8], info: &mut PortInfo) -> Option<()> {
                 IpNextHeaderProtocols::Tcp => {
                     let tcp = TcpPacket::new(ipv6.payload())?;
                     info.tcp.set(tcp.get_destination() as usize, true);
+                    info.report = true;
                 }
                 IpNextHeaderProtocols::Udp => {
                     let udp = UdpPacket::new(ipv6.payload())?;
                     info.udp.set(udp.get_destination() as usize, true);
+                    info.report = true;
                 }
                 _ => return None,
             }
