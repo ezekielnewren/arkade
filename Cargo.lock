@@ -38,6 +38,7 @@ dependencies = [
  "libc",
  "pnet",
  "serde_json",
+ "socket2",
  "tokio",
 ]
 
