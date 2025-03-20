@@ -1,4 +1,4 @@
-use crate::watcher::PortWatcher;
+use crate::watcher::{PortEvent, PortWatcher};
 
 mod podman;
 mod watcher;
@@ -7,25 +7,17 @@ mod watcher;
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut pw = PortWatcher::new("lo");
 
-    pw.looper(|info| {
-        let mut tcp = Vec::new();
-        for i in 0..std::cmp::min(info.tcp.size(), 0x10000) {
-            if info.tcp.test(i) {
-                tcp.push(i.to_string());
-            }
-        }
-        let tcp_ports = tcp.join(", ");
+    pw.watch_udp(34197);
+    pw.watch_udp(34198);
 
-        let mut udp = Vec::new();
-        for i in 0..std::cmp::min(info.udp.size(), 0x10000) {
-            if info.udp.test(i) {
-                udp.push(i.to_string());
-            }
-        }
-        let udp_ports = udp.join(", ");
+    pw.watch_tcp(25565);
+    pw.watch_tcp(25566);
 
-        println!("tcp: {}", tcp_ports);
-        println!("udp: {}", udp_ports);
+    pw.looper(|event| {
+        match event {
+            PortEvent::TCP(port) => println!("tcp: {}", port),
+            PortEvent::UDP(port) => println!("udp: {}", port),
+        }
     }).await?;
 
     Ok(())

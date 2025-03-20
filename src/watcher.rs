@@ -1,8 +1,9 @@
 use std::ffi::CString;
 use std::mem::MaybeUninit;
+use std::ops::{BitAnd, BitAndAssign};
 use std::os::fd::AsRawFd;
 use std::time::{Duration, Instant};
-use bitset::BitSet;
+use bitvec::prelude::*;
 use pnet::packet::ethernet::EthernetPacket;
 use pnet::packet::ip::IpNextHeaderProtocols;
 use pnet::packet::ipv4::Ipv4Packet;
@@ -14,17 +15,31 @@ use socket2::{Domain, Protocol, Socket, Type};
 use tokio::io::unix::AsyncFd;
 use tokio::time::timeout;
 
-pub struct PortWatcher {
-    interface: String,
-    tcp: BitSet,
-    udp: BitSet,
+pub enum PortEvent {
+    TCP(u16),
+    UDP(u16),
 }
 
-pub struct PortInfo {
+pub struct PortWatcher {
+    interface: String,
+    tcp: BitVec,
+    udp: BitVec,
+}
+
+struct PortInfo {
     timestamp: Instant,
-    report: bool,
-    pub tcp: BitSet,
-    pub udp: BitSet,
+    tcp: BitVec,
+    udp: BitVec,
+}
+
+impl Default for PortInfo {
+    fn default() -> Self {
+        Self {
+            timestamp: Instant::now(),
+            tcp: BitVec::repeat(false, 0x10000),
+            udp: BitVec::repeat(false, 0x10000),
+        }
+    }
 }
 
 impl PortWatcher {
@@ -32,13 +47,29 @@ impl PortWatcher {
     pub fn new(iface: &str) -> Self {
         Self {
             interface: iface.to_string(),
-            tcp: BitSet::with_capacity(0x10000),
-            udp: BitSet::with_capacity(0x10000),
+            tcp: BitVec::repeat(false, 0x10000),
+            udp: BitVec::repeat(false, 0x10000),
         }
     }
 
+    pub fn watch_tcp(&mut self, port: u16) {
+        self.tcp.set(port as usize, true);
+    }
+
+    pub fn watch_udp(&mut self, port: u16) {
+        self.udp.set(port as usize, true);
+    }
+
+    pub fn unwatch_tcp(&mut self, port: u16) {
+        self.tcp.set(port as usize, false);
+    }
+
+    pub fn unwatch_udp(&mut self, port: u16) {
+        self.udp.set(port as usize, false);
+    }
+
     pub(crate) async fn looper<F>(&mut self, mut lambda: F) -> Result<(), Box<dyn std::error::Error>>
-    where F: FnMut(&PortInfo)
+    where F: FnMut(PortEvent)
     {
         // let interface = "lo"; // Change to match your network interface (e.g., ens3)
         let iface_name = CString::new(self.interface.as_str()).expect("CString conversion failed");
@@ -85,22 +116,22 @@ impl PortWatcher {
         let mut callback = |info: &mut PortInfo| {
             if info.timestamp.elapsed().as_secs_f32() >= 1.0 {
                 info.timestamp = Instant::now();
-                if info.report {
-                    lambda(&info);
+                info.tcp.bitand_assign(&self.tcp);
+                info.udp.bitand_assign(&self.udp);
+                if info.tcp.any() || info.udp.any() {
+                    for port in info.tcp.iter_ones() {
+                        lambda(PortEvent::TCP(port as u16));
+                    }
+                    for port in info.udp.iter_ones() {
+                        lambda(PortEvent::UDP(port as u16));
+                    }
                 }
-                info.report = false;
-                info.tcp.reset();
-                info.udp.reset();
+                info.tcp.fill(false);
+                info.udp.fill(false);
             }
         };
 
-        let mut info = PortInfo {
-            timestamp: Instant::now(),
-            report: false,
-            tcp: BitSet::with_capacity(0x10000),
-            udp: BitSet::with_capacity(0x10000),
-        };
-
+        let mut info = PortInfo::default();
 
         loop {
             match timeout(Duration::from_secs(1), async_fd.readable()).await {
@@ -136,12 +167,10 @@ fn parse_packet(packet: &[u8], info: &mut PortInfo) -> Option<()> {
                 IpNextHeaderProtocols::Tcp => {
                     let tcp = TcpPacket::new(ipv4.payload())?;
                     info.tcp.set(tcp.get_destination() as usize, true);
-                    info.report = true;
                 }
                 IpNextHeaderProtocols::Udp => {
                     let udp = UdpPacket::new(ipv4.payload())?;
                     info.udp.set(udp.get_destination() as usize, true);
-                    info.report = true;
                 }
                 _ => return None, // Ignore ICMP (Ping), IGMP, and other protocols
             }
@@ -152,12 +181,10 @@ fn parse_packet(packet: &[u8], info: &mut PortInfo) -> Option<()> {
                 IpNextHeaderProtocols::Tcp => {
                     let tcp = TcpPacket::new(ipv6.payload())?;
                     info.tcp.set(tcp.get_destination() as usize, true);
-                    info.report = true;
                 }
                 IpNextHeaderProtocols::Udp => {
                     let udp = UdpPacket::new(ipv6.payload())?;
                     info.udp.set(udp.get_destination() as usize, true);
-                    info.report = true;
                 }
                 _ => return None,
             }
