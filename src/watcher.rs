@@ -1,7 +1,6 @@
 use std::ffi::CString;
 use std::fmt::{Debug, Display, Formatter};
 use std::mem::MaybeUninit;
-use std::ops::{BitAnd, BitAndAssign};
 use std::os::fd::AsRawFd;
 use std::time::{Duration, Instant};
 use bitvec::prelude::*;
@@ -18,25 +17,25 @@ use tokio::io::unix::AsyncFd;
 use tokio::time::timeout;
 
 #[derive(PartialEq, Eq)]
-pub enum PortEvent {
+pub enum PortInfo {
     TCP(u16),
     UDP(u16),
 }
 
-impl Display for PortEvent {
+impl Display for PortInfo {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
-            PortEvent::TCP(port) => write!(f, "{}/tcp", *port),
-            PortEvent::UDP(port) => write!(f, "{}/udp", *port),
+            PortInfo::TCP(port) => write!(f, "{}/tcp", *port),
+            PortInfo::UDP(port) => write!(f, "{}/udp", *port),
         }
     }
 }
 
-impl Debug for PortEvent {
+impl Debug for PortInfo {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
-            PortEvent::TCP(port) => write!(f, "{}/tcp", *port),
-            PortEvent::UDP(port) => write!(f, "{}/udp", *port),
+            PortInfo::TCP(port) => write!(f, "{}/tcp", *port),
+            PortInfo::UDP(port) => write!(f, "{}/udp", *port),
         }
     }
 }
@@ -60,9 +59,9 @@ impl Display for ParsePortError {
 impl std::error::Error for ParsePortError {}
 
 
-pub fn parse_ports(list: &str) -> Result<Vec<PortEvent>, Box<dyn std::error::Error>> {
+pub fn parse_ports(list: &str) -> Result<Vec<PortInfo>, Box<dyn std::error::Error>> {
     let re = Regex::new(r"^(?i)(\d+)/(tcp|udp)$").unwrap();
-    let mut actual: Vec<PortEvent> = Vec::new();
+    let mut actual: Vec<PortInfo> = Vec::new();
 
     for v in list.split(',') {
         if let Some(cap) = re.captures(v) {
@@ -70,8 +69,8 @@ pub fn parse_ports(list: &str) -> Result<Vec<PortEvent>, Box<dyn std::error::Err
             let protocol = cap[2].to_lowercase();
 
             match protocol.as_str() {
-                "tcp" => actual.push(PortEvent::TCP(port)),
-                "udp" => actual.push(PortEvent::UDP(port)),
+                "tcp" => actual.push(PortInfo::TCP(port)),
+                "udp" => actual.push(PortInfo::UDP(port)),
                 _ => return Err(Box::new(ParsePortError {
                     message: format!("invalid protocol: {}", protocol),
                 })),
@@ -111,6 +110,7 @@ pub struct PortWatcher {
     interface: String,
     watch: PortSet,
     reported: PortSet,
+    timestamp: Instant,
     aggregate_window: f32,
 }
 
@@ -118,32 +118,31 @@ pub struct PortWatcher {
 
 impl PortWatcher {
 
-    pub fn new(iface: &str) -> Self {
+    pub fn new(iface: String) -> Self {
         Self {
-            interface: iface.to_string(),
+            interface: iface,
             watch: PortSet::default(),
             reported: PortSet::default(),
+            timestamp: Instant::now(),
             aggregate_window: 5.0,
         }
     }
 
-    pub fn watch_tcp(&mut self, port: u16) {
-        self.watch.tcp.set(port as usize, true);
+    pub fn watch(&mut self, port: PortInfo) {
+        match port {
+            PortInfo::TCP(port) => self.watch.tcp.set(port as usize, true),
+            PortInfo::UDP(port) => self.watch.udp.set(port as usize, true),
+        }
     }
 
-    pub fn watch_udp(&mut self, port: u16) {
-        self.watch.udp.set(port as usize, true);
+    pub fn unwatch(&mut self, port: PortInfo) {
+        match port {
+            PortInfo::TCP(port) => self.watch.tcp.set(port as usize, false),
+            PortInfo::UDP(port) => self.watch.udp.set(port as usize, false),
+        }
     }
 
-    pub fn unwatch_tcp(&mut self, port: u16) {
-        self.watch.tcp.set(port as usize, false);
-    }
-
-    pub fn unwatch_udp(&mut self, port: u16) {
-        self.watch.udp.set(port as usize, false);
-    }
-
-    fn process_packet(&mut self, packet: &[u8]) -> Option<PortEvent> {
+    fn process_packet(&mut self, packet: &[u8]) -> Option<PortInfo> {
         let ethernet = EthernetPacket::new(packet)?;
 
         match ethernet.get_ethertype() {
@@ -154,14 +153,14 @@ impl PortWatcher {
                         let tcp: u16 = TcpPacket::new(ipv4.payload())?.get_destination();
                         if self.watch.tcp[tcp as usize] && !self.reported.tcp[tcp as usize] {
                             self.reported.tcp.set(tcp as usize, true);
-                            return Some(PortEvent::TCP(tcp));
+                            return Some(PortInfo::TCP(tcp));
                         }
                     }
                     IpNextHeaderProtocols::Udp => {
                         let udp: u16 = UdpPacket::new(ipv4.payload())?.get_destination();
                         if self.watch.udp[udp as usize] && !self.reported.udp[udp as usize] {
                             self.reported.udp.set(udp as usize, true);
-                            return Some(PortEvent::UDP(udp));
+                            return Some(PortInfo::UDP(udp));
                         }
                     }
                     _ => return None, // Ignore ICMP (Ping), IGMP, and other protocols
@@ -174,14 +173,14 @@ impl PortWatcher {
                         let tcp: u16 = TcpPacket::new(ipv6.payload())?.get_destination();
                         if self.watch.tcp[tcp as usize] && !self.reported.tcp[tcp as usize] {
                             self.reported.tcp.set(tcp as usize, true);
-                            return Some(PortEvent::TCP(tcp));
+                            return Some(PortInfo::TCP(tcp));
                         }
                     }
                     IpNextHeaderProtocols::Udp => {
                         let udp: u16 = UdpPacket::new(ipv6.payload())?.get_destination();
                         if self.watch.udp[udp as usize] && !self.reported.udp[udp as usize] {
                             self.reported.udp.set(udp as usize, true);
-                            return Some(PortEvent::UDP(udp));
+                            return Some(PortInfo::UDP(udp));
                         }
                     }
                     _ => return None,
@@ -194,7 +193,7 @@ impl PortWatcher {
     }
 
     pub(crate) async fn looper<F>(&mut self, mut lambda: F) -> Result<(), Box<dyn std::error::Error>>
-    where F: FnMut(PortEvent)
+    where F: FnMut(PortInfo)
     {
         let iface_name = CString::new(self.interface.as_str())?;
         let socket = Socket::new(Domain::PACKET, Type::RAW, Some(Protocol::from(libc::ETH_P_ALL as i32)))?;
@@ -241,12 +240,17 @@ impl PortWatcher {
                             if let Some(event) = self.process_packet(vec.as_slice()) {
                                 lambda(event);
                             }
+                            if self.timestamp.elapsed().as_secs_f32() > self.aggregate_window {
+                                self.timestamp = Instant::now();
+                                self.reported.reset();
+                            }
                         },
                         _ => {}
                     }
                 }
                 Ok(Err(e)) => eprintln!("Socket error: {}", e), // Handle socket errors
                 Err(_) => {
+                    self.timestamp = Instant::now();
                     self.reported.reset();
                 }
             }
