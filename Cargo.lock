@@ -37,6 +37,7 @@ dependencies = [
  "hyperlocal",
  "libc",
  "pnet",
+ "regex",
  "serde_json",
  "socket2",
  "tokio",
